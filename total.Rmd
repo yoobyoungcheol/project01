@@ -1,0 +1,495 @@
+---
+title: "직장인 출근에 걸리는 시간이랑 아파트 가격의 관계"
+author: ""
+date: ""
+output: 
+    html_document:
+      toc: true
+      toc_float: true
+      code_folding: show
+      css: styles.css
+---
+
+# 1. 프로젝트 개요
+
+## 1.1 가설 설정 
+아파트 가격에 영향을 주는 변수는 많다. 
+하지만 그중 직장인의 출근에 걸리는 시간이랑 아파트 가격의 관계에 대해서 알아보려고 한다.
+
+## 1.2 분석 방법 
+회귀 분석과 t검정을 통해 두 변수가 얼마만큼의 관계가 있는지를 알아보고자 한다.
+
+## 1.3 활용 데이터
+[공공데이터 포털](https://www.data.go.kr/index.do "공공데이터 포털")
+[서울 열린데이터 광장](https://data.seoul.go.kr/dataVisual/seoul/seoulLivingMigration.do "서울 열린데이터 광장")
+
+# 2. 데이터 수집
+
+## 2.1 서울시 데이터로 한정
+우리나라는 지역에따른 직장과의 거리가 모두 다름으로 인구가 가장많은 서울시에 평단가가 가장 높은 5개 행정동을 기준으로 한다
+
+## 2.2 서울시 이동인구 데이터 추출 
+서울지역 아파트의 가격의 변동에 관계 조사하기 위해 서울에서 출발하고 서울로 도착하는 자료만 추출한다
+
+# 3. 데이터 전처리
+
+## 3.2 아파트 가격 전처리 
+공공데이터 포털에서는 서울시 아파트의 거래정보만이 아니라 전국의 아파트 실거래 매매자료를 제공 하고있으므로 전처리한 출근시간에 비교할 수 있게 전처리하는 과정
+
+### 3.1.1 API로 실거래 자료 받아오기
+```{r, include=FALSE, echo=TRUE}
+library(ggplot2)
+library(readxl)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(XML)
+```
+
+```{r, eval=FALSE, echo=TRUE}
+
+setwd(dirname(rstudioapi::getSourceEditorContext()$path)) # 작업폴더 설정
+getwd()   # 확인
+
+loc <- read.csv("./01_code/sigun_code/sigun_code.csv", fileEncoding="UTF-8")  #  지역코드
+loc$code <- as.character(loc$code) # 행정구역명 문자 변환     
+head(loc, 2) # 확인
+
+datelist <- seq(from = as.Date('2022-01-01'), # 시작
+                to   = as.Date('2023-12-31'), # 종료
+                by    = '1 month')            # 단위
+datelist <- format(datelist, format = '%Y%m') # 형식변환(YYYY-MM-DD => YYYYMM) 
+datelist[1:3]          # 확인        # 확인
+
+service_key <- "CqPD97BFcqG5g1vWQlwtd4rtunAcqUMxOIuBz5PyF4CDd2o1Oqa%2Fw95dbMW7L6QqDGF942SkRQPAROU2oeHTvA%3D%3D"  # 인증키 입력
+
+url_list <- list() # 빈 리스트 만들기
+cnt <-0	           # 반복문의 제어 변수 초깃값 설정
+
+for(i in 1:nrow(loc)){           # 반복: 25개 자치구
+  for(j in 1:length(datelist)){  # 반복: 12개월
+    cnt <- cnt + 1               # 누적
+    url_list[cnt] <- paste0("http://openapi.molit.go.kr:8081/OpenAPI_ToolInstallPackage/service/rest/RTMSOBJSvc/getRTMSDataSvcAptTrade?",
+                            "LAWD_CD=", loc[i,1],         # 지역코드
+                            "&DEAL_YMD=", datelist[j],    # 수집월
+                            "&numOfRows=", 100,           # 한번에 가져올 최대 자료 수
+                            "&serviceKey=", service_key)  # 인증키
+  } 
+}
+
+length(url_list)                # 요청목록 갯수 확인
+
+library(XML)        # install.packages("XML")      
+library(data.table) # install.packages("data.table")
+library(stringr)    # install.packages("stringr")
+
+raw_data <- list()        # xml 임시 저장소
+root_Node <- list()       # 거래내역 추출 임시 저장소
+total <- list()           # 거래내역 정리 임시 저장소
+dir.create("02_raw_data") # 새로운 폴더 만들기
+
+
+for(i in 1:length(url_list)){   # 요청목록(url_list) 반복
+  raw_data[[i]] <- xmlTreeParse(url_list[i], useInternalNodes = TRUE,encoding = "utf-8") # 결과 저장
+  root_Node[[i]] <- xmlRoot(raw_data[[i]])	# xmlRoot로 추출
+
+  items <- root_Node[[i]][[2]][['items']]  # 전체 거래내역(items) 추출
+  size <- xmlSize(items)                   # 전체 거래 건수 확인    
+  
+  item <- list()  # 전체 거래내역(items) 저장 임시 리스트 생성
+  item_temp_dt <- data.table()  # 세부 거래내역(item) 저장 임시 테이블 생성
+  Sys.sleep(.1)  # 0.1초 멈춤
+  for(m in 1:size){  # 전체 거래건수(size)만큼 반복
+    #---# 세부 거래내역 분리   
+    item_temp <- xmlSApply(items[[m]],xmlValue)
+    item_temp_dt <- data.table(year = item_temp[4],     # 거래 년 
+                               month = item_temp[7],    # 거래 월
+                               day = item_temp[8],      # 거래 일
+                               price = item_temp[1],    # 거래금액
+                               code = item_temp[12],    # 지역코드
+                               dong_nm = item_temp[5],  # 법정동
+                               jibun = item_temp[11],   # 지번
+                               con_year = item_temp[3], # 건축연도 
+                               apt_nm = item_temp[6],   # 아파트 이름   
+                               area = item_temp[9],     # 전용면적
+                               floor = item_temp[13])   # 층수 
+    item[[m]] <- item_temp_dt}    # 분리된 거래내역 순서대로 저장
+  apt_bind <- rbindlist(item)     # 통합 저장
+  
+  region_nm <- subset(loc, code== str_sub(url_list[i],115, 119))$addr_1 # 지역명 추출
+  month <- str_sub(url_list[i],130, 135)   # 연월(YYYYMM) 추출
+  path <- as.character(paste0("./02_raw_data/", region_nm, "_", month,".csv")) # 저장위치 설정
+  write.csv(apt_bind, path)     # csv 저장
+  msg <- paste0("[", i,"/",length(url_list), "] 수집한 데이터를 [", path,"]에 저장 합니다.") # 알림 메시지
+  cat(msg, "\n\n")
+}   # 바깥쪽 반복문 종료
+
+```
+
+### 3.1.2 거래자료에 있는 법정동을 행정동으로 바꾸어주기
+
+```{r, eval=FALSE, echo=TRUE}
+
+load("./home3/03_apt_price.rdata")
+df_code <- read.csv("./home3/code.csv", fileEncoding = "UTF-8")
+df_code
+apt_price
+
+apt_price2 <- merge(apt_price,df_code, by = "code")
+apt_price2
+apt_price3 <- apt_price2 %>% select(year,month,price,dong_nm,jibun,apt_nm,addr_2,area)
+head(apt_price3,4)
+apt_price3$juso_jibun <-paste0(apt_price3$addr_2,"",apt_price3$dong_nm,"",apt_price3$jibun,"",apt_price3$apt_nm)
+head(apt_price3,3)
+apt_price4 <- apt_price3 %>% select(-dong_nm,-jibun,-addr_2,-apt_nm)
+head(apt_price4,5)
+apt_price4 <- apt_price4 %>%
+  mutate(price = as.numeric(gsub(",", "", price)))
+apt_price4
+class(apt_price4$area)
+apt_price4 <- apt_price4 %>% mutate(pricea = round(price/(area/3.3)))
+head(apt_price4,10)
+apt_price4 <- apt_price4 %>% select(-price,-area)
+apt_juso<- data.frame(apt_price4$juso_jibun)
+#apt_juso<- data.frame(apt_juso[!duplicated(apt_juso),])
+apt_juso
+add_list <-list()
+nrow(apt_juso)
+cnt <- 0
+kakao_key = "04e275e96171c710f07dbccebb6188a4"
+for(i in 1:nrow(apt_juso)){ 
+  #---# 에러 예외처리 구문 시작
+  tryCatch(
+    {
+      #---# 주소로 좌표값 요청
+      lon_lat <- GET(url = 'https://dapi.kakao.com/v2/local/search/address.json',
+                     query = list(query = apt_juso[i,]),
+                     add_headers(Authorization = paste0("KakaoAK ", kakao_key)))
+      #---# 위경도만 추출하여 저장
+      coordxy <- lon_lat %>% content(as = 'text') %>% RJSONIO::fromJSON()
+      #---# 반복횟수 카운팅
+      cnt = cnt + 1
+      #---# 주소, 경도, 위도 정보를 리스트로 저장
+      add_list[[cnt]] <- data.table(apt_juso = apt_juso[i,], 
+                                    coord_x = coordxy$documents[[1]]$x, 
+                                    coord_y = coordxy$documents[[1]]$y)
+      #---# 진행상황 알림 메시지
+      message <- paste0("[", i,"/",nrow(apt_juso),"] 번째 (", 
+                        round(i/nrow(apt_juso)*100,2)," %) [", apt_juso[i,] ,"] 지오코딩 중입니다: 
+       X= ", add_list[[cnt]]$coord_x, " / Y= ", add_list[[cnt]]$coord_y)
+      cat(message, "\n\n")
+      #---# 예외처리 구문 종료
+    }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")}
+  )
+}
+
+dir.create("coordxy")
+save(add_list, file="./coordxy/coo rdxy.rdata")
+
+
+
+aad_list <- list()
+for(i in 1:nrow(apt_juso)){ 
+  aad_list[[i]] <- data.table(apt_juso = apt_juso[i,])
+}
+
+dir.create("sum08")
+save(total2, file="./sum08/sum08.rdata")
+write.csv(total2,"./sum08/sum08.csv")
+
+asd_list <- add_list
+juso <- rbindlist(add_list)
+nrow(juso)
+add_list[[988]][[3]]
+for(i in 1:nrow(juso)){
+  url <- paste0("https://dapi.kakao.com/v2/local/geo/coord2regioncode.json?x=", asd_list[[i]][[2]], "&y=", asd_list[[i]][[3]])
+  response <- GET(url, add_headers("Authorization" = paste("KakaoAK", kakao_key)))
+  result <- content(response, "parsed")
+  result
+  coordxy <- response %>%  content( as = "text") %>% fromJSON()
+  coordxy
+  aad_list[[i]] <- data.table(apt_juso = apt_juso[i,], 
+                              hang = result$documents[[2]]$region_3depth_name)
+}
+aad_list
+hang <- rbindlist(aad_list,fill = TRUE)
+hang
+hang <- na.omit(hang)
+hang
+head(apt_price4,3)
+apt_price4
+
+setwd(dirname(rstudioapi::getSourceEditorContext()$path))  # 작업폴더 설정
+files <- dir("./02_raw_data")    # 폴더 내 모든 파일 이름 읽기
+library(plyr)               # install.packages("plyr")
+apt_price <- ldply(as.list(paste0("./02_raw_data/", files)), read.csv) # 모든 파일 하나로 결합
+tail(apt_price, 2)  # 확인
+
+load("./hang/hang.rdata")
+load("./home3/03_apt_price.rdata")
+df_code <- read.csv("./home3/code.csv", fileEncoding = "UTF-8")
+df_code
+apt_price
+hang <-as.data.frame(hang)
+apt_price2 <- merge(apt_price,df_code, by = "code")
+apt_price2
+apt_price3 <- apt_price2 %>% select(year,month,price,dong_nm,jibun,apt_nm,addr_2,area)
+head(apt_price3,4)
+apt_price3$juso_jibun <-paste0(apt_price3$addr_2,"",apt_price3$dong_nm,"",apt_price3$jibun,"",apt_price3$apt_nm)
+head(apt_price3,3)
+apt_price4 <- apt_price3 %>% select(-dong_nm,-jibun,-addr_2,-apt_nm)
+head(apt_price4,5)
+apt_price4 <- apt_price4 %>%
+  mutate(price = as.numeric(gsub(",", "", price)))
+apt_price4
+class(apt_price4$area)
+apt_price4 <- apt_price4 %>% mutate(pricea = round(price/(area/3.3)))
+head(apt_price4,10)
+apt_price4 <- apt_price4 %>% select(-price,-area)
+apt_price4
+colnames(hang) <- c("juso_jibun","heng")
+head(apt_price4,4)
+head(hang,4)
+apt_price5 <- merge(apt_price4,hang, by = "juso_jibun", all.x = TRUE)
+apt_price5 <- unique(apt_price5)
+head(apt_price6,4)
+apt_price6 <- apt_price5 %>% select(pricea,heng)
+apt_price6 <- na.omit(apt_price6)
+apt_price7 <- apt_price6 %>%group_by(heng) %>%mutate(price_avg = round(mean(pricea))) %>% select(-pricea)
+apt_price7 <- unique(apt_price7)
+apt_price7 <- as.data.frame(apt_price7)
+```
+
+### 3.1.3 평단가가 가장높은 행정동 top5찾기
+```{r, eval=FALSE, echo=TRUE}
+apt_price8 <- apt_price7[order(-apt_price7$price_avg), ]
+apt_price8
+apt_price9 <- head(apt_price8,5)
+apt_price9
+apt_price7
+apt_price_top5 <-apt_price9
+```
+
+## 3.2 출근시간 전처리
+출근시간이 아파트 가격에 미치는 영향을 분석하기 위해 모은 자료를 분석할수 있게 데이터를 정제한다.
+서울 열린데이터 광장에서는 서울시의 이동인구 뿐만 아니라 다른 지역 에서 서울로 들어온 사람들의 이동정보도 함께 제공하고 있고
+같은 출발 지점에서 출발을 하여도 도착시간과 이동인구수가 각각 다르기 때문에 서울시 아파트 가격과 비교하기 위해 출발지역과 도착시간,이동인구수에 대한 전처리를 해주기로 하였다.
+
+### 3.2.1 직장인기준 적용하기
+
+```{r, eval=FALSE, echo=TRUE}
+files <-dir("./home")
+# home에 들어있는 9시까지 도착하는 파일을 전부 불러온다
+df1 <- ldply(as.list(paste0("./home/",files)),read.csv)
+df1
+# 직장인 출근 시간이기 때문에 휴일인 토요일과 월요일 자료를 배제한다
+df2 <- df1 %>% filter(요일 %in% c("월","화","수","목","금"))
+# 일을 하는 직장인을 기준으로 잡았으니 미성년자와 노년의 정보를 배제하여준다
+df3 <- df2 %>% filter(20<=나이 & 나이<=60)
+# 이동인구수의 합의 *로 되어있는 이상치를 제거한다
+df4 <- df3 %>% filter(이동인구.합.!="*")
+# 도착 지역이 TOP5인것만 골라준다
+df5 <- df4 %>% filter(도착.행정동.코드 %in% c("1122056","1122057","1122058","1123077","1123080"))
+# 출발지역이 서울인것만 골라준다
+df6 <- df5 %>% filter(substr(출발.행정동.코드,1,2)=="11")
+df7 <- df6 %>% select(-대상연월,-요일,-도착시간,-성별,-나이,-이동유형)
+df7$평균.이동.시간.분. <- as.numeric(df7$평균.이동.시간.분.)
+df7$이동인구.합. <- as.numeric(df7$이동인구.합.)
+str(df7)
+colnames(df7) <- c("start", "end", "move_m", "pep")
+df8 <- df7 %>% group_by(start,end) %>% summarise(avgw = weighted.mean(move_m, pep), .groups = "drop")
+df9 <-as.data.frame(df7)
+```
+
+### 3.2.2 출발지역이 서울이고 도착지가가 서울 top 5인곳 찾기
+```{r, eval=FALSE, echo=TRUE}
+df_1 <- read_excel("./home8/20210907.xlsx")
+df_1 %>%filter(name %in% c("반포본동","반포2동","반포1동","압구정동","개포2동"))
+df_2 <- as.data.frame(df_1)
+head(df9,4)
+head(df_2,4)
+total1 <- merge(df8, df_2, by.x = "start", by.y = "읍면동", all.x = TRUE)
+total1
+total2 <- total1 %>% select(-시도,-시군구,-full_name,-start)
+total2
+colnames(total2) <- c("end","avgw","start")
+total3 <- merge(total2, df_2, by.x = "end", by.y = "읍면동", all.x = TRUE)
+total3
+total4 <- total3 %>% select(-시도,-시군구,-full_name,-end)
+colnames(total4) <- c("avgw","start","end")
+total5 <- total4 %>% group_by(start,end) %>% summarise(avg = mean(avgw))
+total6 <- as.data.frame(total5)
+start_end <- total6
+```
+## 3.3 출근시간과 아파트가격 데이터 병합하기
+비교하기 위하여 서로 다른 성질을 가진 부분들을 수정하여 비교자료를 만들기 위한 전처리의 마지막 단계
+
+### 3.3.1 데이터 병합하기
+
+```{r, eval=FALSE, echo=TRUE}
+load("./apt_price/apt_price.rdata")
+load("./apt_price/apt_price_top5.rdata")
+load("./start_end/start_end.rdata")
+
+apt_price_top5
+apt_price7
+start_end
+
+head(apt_price7,4)
+head(start_end,4)
+
+end <- merge(start_end, apt_price7, by.x = "start", by.y = "heng", all.x = TRUE)
+end
+dir.create("avg_end")
+save(start_end, file="./avg_end/avg_end.rdata")
+write.csv(start_end,"./avg_end/avg_end.csv")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+load("./avg_end/avg_end.rdata")
+head(end,10)
+summary(end)
+top1 <- end %>% filter(end == "반포본동")
+top2 <- end %>% filter(end == "반포2동")
+top3 <- end %>% filter(end == "반포1동")
+top4 <- end %>% filter(end == "압구정동")
+top5 <- end %>% filter(end == "개포2동")
+```
+# 4. 데이터 분석
+top1 반포본동
+top2 반포2동
+top3 반포1동
+top4 압구정동
+top5 개포2동
+```{r pressure_plot, echo=FALSE,message=FALSE,warning=FALSE}
+ggplot(top1, aes(x=price_avg,y=avg)) +
+  geom_point() +
+  stat_smooth(method="lm",colour="red",linetype = "dashed")
+cor.test(top1$avg,top1$price_avg)    
+
+ggplot(top2, aes(x=price_avg,y=avg)) +
+  geom_point() +
+  stat_smooth(method="lm",colour="red",linetype = "dashed")         
+cor.test(top2$avg,top2$price_avg)    
+
+ggplot(top3, aes(x=price_avg,y=avg)) +
+  geom_point() +
+  stat_smooth(method="lm",colour="red",linetype = "dashed")         
+cor.test(top3$avg,top3$price_avg)                                  
+
+ggplot(top4, aes(x=price_avg,y=avg)) +
+  geom_point() +
+  stat_smooth(method="lm",colour="red",linetype = "dashed")         
+cor.test(top4$avg,top4$price_avg)  
+
+ggplot(top5, aes(x=price_avg,y=avg)) +
+  geom_point() +
+  stat_smooth(method="lm",colour="red",linetype = "dashed")         
+cor.test(top5$avg,top5$price_avg)
+```
+
+## 4.2 데이터 분석 결과
+회귀 분석과 t검정을 통해 검증 해본 결과
+
+반포본동
+p = 9.536e-05  cor = -0.285942
+
+반포 2동
+p = 8.782e-09  cor = -0.2843548
+
+반포 1동 
+p = <2.2e-16  cor = -0.5627044
+
+압구정동
+p = <2.2e-16  cor = -0.5469636
+
+개포2동
+p = 1.376e-14 cor = -0.4007664
+t검정으로 본 p의 값이 5개 동 모두에서 0.05보다 매우 낮은 수치를 보이며 연관성을 보이고있고
+col값도 -0.2에서 -0.5정도의 음의 상관관계를 보이고 있는것으로 보아
+출근 시간과 아파틔 가격의 관계는 실제로는 상관관계가 있는것으로 보입니다.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script src="jquery-3.6.0.min.js"></script> 
+
+<script>
+$(document).ready(function() {
+  $('.tocify-wrapper').prepend('<div class="sidebar-menu">  # 추가된 부분: 사이드바 메뉴 컨테이너
+    <ul>
+      <li><a href="# 1. 프로젝트 개요">1.프로젝트 개요</a>
+        <ul>
+          <li><a href="## 1.1 가설 설정"> 1.1 가설 설정</a></li>
+          <li><a href="## 1.2 분석 방법 "> 1.2 분석 방법</a></li>
+          <li><a href="## 1.3 활용 데이터"> 1.3 활용 데이터</a></li>
+        </ul>
+      </li>
+      <li><a href="## 2.1 서울시 데이터로 한정">2.데이터 수집</a></li>
+      <li><a href="# 3.데이터 분석">3.데이터 분석</a></li>
+      <li><a href="# 4.결론">4.결론</a></li>
+    </ul>
+  </div>');
+  
+  
+  
+  
+  
+  
+  
+  $('.sidebar-menu a').click(function(e) {
+    e.preventDefault();
+    var target = $(this).attr('href');
+    $('html, body').animate({
+      scrollTop: $(target).offset().top
+    }, 500);
+</script>
+  
+
